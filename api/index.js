@@ -60,10 +60,14 @@ const taskSchema = new mongoose.Schema(
   },
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );
-taskSchema.pre("save", function (next) {
-  if (this.isModified("progress") && this.progress === 100) this.status = "Review";
-  next();
+
+// ✅ Use async pre-save — no next() parameter needed
+taskSchema.pre("save", async function () {
+  if (this.isModified("progress") && this.progress === 100) {
+    this.status = "Review";
+  }
 });
+
 const Task = mongoose.model("Task", taskSchema);
 
 const taskActivitySchema = new mongoose.Schema(
@@ -118,8 +122,20 @@ const protect = async (req, res, next) => {
   }
 };
 
-const logActivity = (taskId, userId, prevStatus, newStatus, progress, comment = "") =>
-  TaskActivity.create({ task_id: taskId, user_id: userId, previous_status: prevStatus, new_status: newStatus, progress, comment });
+const logActivity = async (taskId, userId, prevStatus, newStatus, progress, comment = "") => {
+  try {
+    await TaskActivity.create({
+      task_id:         taskId,
+      user_id:         userId,
+      previous_status: prevStatus,
+      new_status:      newStatus,
+      progress,
+      comment,
+    });
+  } catch (err) {
+    console.error("logActivity error:", err.message);
+  }
+};
 
 // ── APP ───────────────────────────────────────────────────
 const app = express();
@@ -127,7 +143,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ✅ Fixed: use named params so `next` is never shadowed or dropped
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -256,20 +271,34 @@ taskRouter.get("/", async (req, res) => {
 
 taskRouter.post("/", async (req, res) => {
   try {
-    const { task_title, task_description, priority, assigned_to, team_leader_id, due_date, column_position, team_id } = req.body;
+    const {
+      task_title, task_description, priority,
+      assigned_to, team_leader_id, due_date,
+      column_position, team_id,
+    } = req.body;
+
     if (!team_id) return res.status(400).json({ success: false, message: "team_id is required." });
+
     const team = await Team.findById(team_id);
     if (!team) return res.status(404).json({ success: false, message: "Team not found." });
+
     const isLeader = team.team_leader_id.toString() === req.user._id.toString();
     if (!isLeader && req.user.role !== "admin") {
       return res.status(403).json({ success: false, message: "Only team leader or admin can create tasks." });
     }
+
     const task = await Task.create({
-      task_title, task_description, priority, assigned_to,
+      task_title,
+      task_description,
+      priority,
+      assigned_to:    assigned_to    || undefined,
       team_leader_id: team_leader_id || req.user._id,
-      team_id, due_date, column_position,
-      created_by: req.user._id,
+      team_id,
+      due_date:       due_date       || undefined,
+      column_position,
+      created_by:     req.user._id,
     });
+
     await logActivity(task._id, req.user._id, null, "To-Do", 0, "Task created");
     res.status(201).json({ success: true, task });
   } catch (err) {
@@ -294,7 +323,8 @@ taskRouter.patch("/:id", async (req, res) => {
   try {
     const task = await Task.findById(req.params.id);
     if (!task) return res.status(404).json({ success: false, message: "Task not found." });
-    const prevStatus = task.status, prevProgress = task.progress;
+    const prevStatus   = task.status;
+    const prevProgress = task.progress;
     ["task_title","task_description","status","progress","priority","assigned_to","column_position","due_date"]
       .forEach(f => { if (req.body[f] !== undefined) task[f] = req.body[f]; });
     await task.save();
@@ -311,7 +341,9 @@ taskRouter.patch("/:id/accept", async (req, res) => {
   try {
     const task = await Task.findById(req.params.id);
     if (!task) return res.status(404).json({ success: false, message: "Task not found." });
-    if (task.status !== "To-Do") return res.status(400).json({ success: false, message: "Only To-Do tasks can be accepted." });
+    if (task.status !== "To-Do") {
+      return res.status(400).json({ success: false, message: "Only To-Do tasks can be accepted." });
+    }
     const prevStatus = task.status;
     task.status      = "In Progress";
     task.assigned_to = req.user._id;
@@ -360,7 +392,9 @@ reviewRouter.post("/:taskId", async (req, res) => {
   try {
     const task = await Task.findById(req.params.taskId);
     if (!task) return res.status(404).json({ success: false, message: "Task not found." });
-    if (task.status !== "Review") return res.status(400).json({ success: false, message: "Task is not in Review." });
+    if (task.status !== "Review") {
+      return res.status(400).json({ success: false, message: "Task is not in Review." });
+    }
     const team     = await Team.findById(task.team_id);
     const isLeader = team?.team_leader_id.toString() === req.user._id.toString();
     if (!isLeader && req.user.role !== "admin") {
