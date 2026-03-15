@@ -3,19 +3,24 @@ const express  = require("express");
 const cors     = require("cors");
 const mongoose = require("mongoose");
 const admin    = require("firebase-admin");
+
 const PORT      = process.env.PORT      || 5000;
 const MONGO_URI = process.env.MONGO_URI;
 const NODE_ENV  = process.env.NODE_ENV  || "development";
+
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 
+// ── DB ────────────────────────────────────────────────────
 const connectDB = async () => {
   if (mongoose.connection.readyState >= 1) return;
   await mongoose.connect(MONGO_URI);
 };
-mongoose.connection.on("connected",    () => console.log(`✅  MongoDB Connected`));
-mongoose.connection.on("disconnected", () => console.log(`⚠️   MongoDB Disconnected`));
+mongoose.connection.on("connected",    () => console.log("✅  MongoDB Connected"));
+mongoose.connection.on("disconnected", () => console.log("⚠️   MongoDB Disconnected"));
 mongoose.connection.on("error",        (e) => console.error(`❌  MongoDB Error: ${e.message}`));
+
+// ── MODELS ────────────────────────────────────────────────
 const userSchema = new mongoose.Schema(
   {
     firebase_uid: { type: String, required: true, unique: true },
@@ -28,6 +33,7 @@ const userSchema = new mongoose.Schema(
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );
 const User = mongoose.model("User", userSchema);
+
 const teamSchema = new mongoose.Schema(
   {
     team_name:      { type: String, required: true, trim: true },
@@ -83,6 +89,8 @@ const taskReviewSchema = new mongoose.Schema(
   { timestamps: { createdAt: "created_at", updatedAt: false } }
 );
 const TaskReview = mongoose.model("TaskReview", taskReviewSchema);
+
+// ── MIDDLEWARE ────────────────────────────────────────────
 const protect = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -110,30 +118,29 @@ const protect = async (req, res, next) => {
   }
 };
 
-// Check if user is team leader or admin of a specific team
-const isTeamLeaderOrAdmin = async (req, res, next) => {
-  const teamId = req.params.teamId || req.body.team_id || req.query.team_id;
-  if (req.user.role === "admin") return next();
-  if (!teamId) return res.status(400).json({ success: false, message: "team_id required." });
-  const team = await Team.findById(teamId);
-  if (!team) return res.status(404).json({ success: false, message: "Team not found." });
-  if (team.team_leader_id.toString() === req.user._id.toString()) return next();
-  return res.status(403).json({ success: false, message: "Only team leader or admin can do this." });
-};
-
 const logActivity = (taskId, userId, prevStatus, newStatus, progress, comment = "") =>
   TaskActivity.create({ task_id: taskId, user_id: userId, previous_status: prevStatus, new_status: newStatus, progress, comment });
 
+// ── APP ───────────────────────────────────────────────────
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(async (_req, _res, next) => { await connectDB(); next(); });
 
-if (NODE_ENV === "development") {
-  app.use((req, _res, next) => { console.log(`📡  [${req.method}] ${req.originalUrl}`); next(); });
-}
+// ✅ Fixed: use named params so `next` is never shadowed or dropped
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error("DB connection error:", err.message);
+    res.status(500).json({ success: false, message: "Database connection failed." });
+  }
+});
+
+// ── AUTH ──────────────────────────────────────────────────
 const authRouter = express.Router();
+
 authRouter.post("/sync", protect, async (req, res) => {
   try {
     const { name, role } = req.body;
@@ -150,15 +157,14 @@ authRouter.get("/me", protect, (req, res) => {
   res.status(200).json({ success: true, user: req.user });
 });
 
+// ── TEAMS ─────────────────────────────────────────────────
 const teamRouter = express.Router();
 teamRouter.use(protect);
+
 teamRouter.get("/", async (req, res) => {
   try {
     const teams = await Team.find({
-      $or: [
-        { team_leader_id: req.user._id },
-        { members: req.user._id },
-      ],
+      $or: [{ team_leader_id: req.user._id }, { members: req.user._id }],
     })
       .populate("team_leader_id", "name email")
       .populate("members", "name email role");
@@ -168,65 +174,27 @@ teamRouter.get("/", async (req, res) => {
   }
 });
 
-// POST /api/teams — ANY logged-in user can create a room, they become team_leader
 teamRouter.post("/", async (req, res) => {
   try {
     const { team_name } = req.body;
     if (!team_name?.trim()) {
       return res.status(400).json({ success: false, message: "team_name is required." });
     }
-
     const team = await Team.create({
       team_name:      team_name.trim(),
       team_leader_id: req.user._id,
       members:        [req.user._id],
     });
-
-    // Promote creator to team_leader role
-    await User.findByIdAndUpdate(req.user._id, {
-      role:    "team_leader",
-      team_id: team._id,
-    });
-
+    await User.findByIdAndUpdate(req.user._id, { role: "team_leader", team_id: team._id });
     const populated = await Team.findById(team._id)
       .populate("team_leader_id", "name email")
       .populate("members", "name email role");
-
     res.status(201).json({ success: true, team: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// PATCH /api/teams/:id/add-member — team leader or admin only
-teamRouter.patch("/:id/add-member", async (req, res) => {
-  try {
-    const { user_id } = req.body;
-    if (!user_id) return res.status(400).json({ success: false, message: "user_id is required." });
-
-    const team = await Team.findById(req.params.id);
-    if (!team) return res.status(404).json({ success: false, message: "Team not found." });
-
-    // Only team leader or admin can add members
-    const isLeader = team.team_leader_id.toString() === req.user._id.toString();
-    if (!isLeader && req.user.role !== "admin") {
-      return res.status(403).json({ success: false, message: "Only the team leader can add members." });
-    }
-
-    await Team.findByIdAndUpdate(req.params.id, { $addToSet: { members: user_id } });
-    await User.findByIdAndUpdate(user_id, { team_id: team._id });
-
-    const updated = await Team.findById(req.params.id)
-      .populate("team_leader_id", "name email")
-      .populate("members", "name email role");
-
-    res.status(200).json({ success: true, team: updated });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// GET /api/teams/:id — get a single team by id
 teamRouter.get("/:id", async (req, res) => {
   try {
     const team = await Team.findById(req.params.id)
@@ -238,58 +206,70 @@ teamRouter.get("/:id", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+teamRouter.patch("/:id/add-member", async (req, res) => {
+  try {
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ success: false, message: "user_id is required." });
+    const team = await Team.findById(req.params.id);
+    if (!team) return res.status(404).json({ success: false, message: "Team not found." });
+    const isLeader = team.team_leader_id.toString() === req.user._id.toString();
+    if (!isLeader && req.user.role !== "admin") {
+      return res.status(403).json({ success: false, message: "Only the team leader can add members." });
+    }
+    await Team.findByIdAndUpdate(req.params.id, { $addToSet: { members: user_id } });
+    await User.findByIdAndUpdate(user_id, { team_id: team._id });
+    const updated = await Team.findById(req.params.id)
+      .populate("team_leader_id", "name email")
+      .populate("members", "name email role");
+    res.status(200).json({ success: true, team: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── TASKS ─────────────────────────────────────────────────
 const taskRouter = express.Router();
 taskRouter.use(protect);
+
 taskRouter.get("/", async (req, res) => {
   try {
     const { team_id } = req.query;
     if (!team_id) return res.status(400).json({ success: false, message: "team_id query param required." });
-
-    // Make sure user is a member of this team
     const team = await Team.findById(team_id);
     if (!team) return res.status(404).json({ success: false, message: "Team not found." });
-
     const isMember = team.members.some(m => m.toString() === req.user._id.toString());
     const isLeader = team.team_leader_id.toString() === req.user._id.toString();
     if (!isMember && !isLeader && req.user.role !== "admin") {
       return res.status(403).json({ success: false, message: "You are not a member of this team." });
     }
-
     const tasks = await Task.find({ team_id })
       .populate("assigned_to",    "name email")
       .populate("team_leader_id", "name email")
       .populate("created_by",     "name email")
       .sort({ column_position: 1, created_at: -1 });
-
     res.status(200).json({ success: true, count: tasks.length, tasks });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// POST /api/tasks — team leader or admin only
 taskRouter.post("/", async (req, res) => {
   try {
     const { task_title, task_description, priority, assigned_to, team_leader_id, due_date, column_position, team_id } = req.body;
-
     if (!team_id) return res.status(400).json({ success: false, message: "team_id is required." });
-
     const team = await Team.findById(team_id);
     if (!team) return res.status(404).json({ success: false, message: "Team not found." });
-
     const isLeader = team.team_leader_id.toString() === req.user._id.toString();
     if (!isLeader && req.user.role !== "admin") {
       return res.status(403).json({ success: false, message: "Only team leader or admin can create tasks." });
     }
-
     const task = await Task.create({
       task_title, task_description, priority, assigned_to,
       team_leader_id: team_leader_id || req.user._id,
-      team_id,
-      due_date, column_position,
+      team_id, due_date, column_position,
       created_by: req.user._id,
     });
-
     await logActivity(task._id, req.user._id, null, "To-Do", 0, "Task created");
     res.status(201).json({ success: true, task });
   } catch (err) {
@@ -347,13 +327,11 @@ taskRouter.delete("/:id", async (req, res) => {
   try {
     const task = await Task.findById(req.params.id);
     if (!task) return res.status(404).json({ success: false, message: "Task not found." });
-
-    const team    = await Team.findById(task.team_id);
+    const team     = await Team.findById(task.team_id);
     const isLeader = team?.team_leader_id.toString() === req.user._id.toString();
     if (!isLeader && req.user.role !== "admin") {
       return res.status(403).json({ success: false, message: "Only team leader or admin can delete tasks." });
     }
-
     await Task.findByIdAndDelete(req.params.id);
     await TaskActivity.deleteMany({ task_id: req.params.id });
     await TaskReview.deleteMany({ task_id: req.params.id });
@@ -374,6 +352,7 @@ taskRouter.get("/:id/activity", async (req, res) => {
   }
 });
 
+// ── REVIEWS ───────────────────────────────────────────────
 const reviewRouter = express.Router();
 reviewRouter.use(protect);
 
@@ -382,17 +361,14 @@ reviewRouter.post("/:taskId", async (req, res) => {
     const task = await Task.findById(req.params.taskId);
     if (!task) return res.status(404).json({ success: false, message: "Task not found." });
     if (task.status !== "Review") return res.status(400).json({ success: false, message: "Task is not in Review." });
-
-    const team    = await Team.findById(task.team_id);
+    const team     = await Team.findById(task.team_id);
     const isLeader = team?.team_leader_id.toString() === req.user._id.toString();
     if (!isLeader && req.user.role !== "admin") {
       return res.status(403).json({ success: false, message: "Only team leader or admin can review tasks." });
     }
-
     const { review_status, feedback } = req.body;
     const review     = await TaskReview.create({ task_id: task._id, reviewer_id: req.user._id, review_status, feedback });
     const prevStatus = task.status;
-
     if (review_status === "approved") {
       task.status = "Done";
       await task.save();
@@ -420,15 +396,17 @@ reviewRouter.get("/:taskId", async (req, res) => {
   }
 });
 
+// ── MOUNT ─────────────────────────────────────────────────
 app.use("/api/auth",    authRouter);
 app.use("/api/tasks",   taskRouter);
 app.use("/api/reviews", reviewRouter);
 app.use("/api/teams",   teamRouter);
 
-app.get("/", (_req, res) => res.json({ success: true, message: "Jiva Backend API Running 🚀" }));
+app.get("/", (req, res) => res.json({ success: true, message: "Jiva Backend API Running 🚀" }));
 app.use((req, res) => res.status(404).json({ success: false, message: `${req.originalUrl} not found.` }));
-app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ success: false, message: err.message }));
+app.use((err, req, res, next) => res.status(err.statusCode || 500).json({ success: false, message: err.message }));
 
+// ── START (local only) ────────────────────────────────────
 if (NODE_ENV !== "production") {
   connectDB().then(() => {
     app.listen(PORT, () => console.log(`🚀  http://localhost:${PORT}`));
