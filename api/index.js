@@ -333,7 +333,7 @@ app.use("/api/tasks",   taskRouter);
 app.use("/api/reviews", reviewRouter);
 app.use("/api/teams",   teamRouter);
 
-app.get("/", (_req, res) => res.json({ success: true, message: "Task Manager API 🚀" }));
+app.get("/", (_req, res) => res.json({ success: true, message: "Jiva Backend API Running 🚀" }));
 app.use((req, res) => res.status(404).json({ success: false, message: `${req.originalUrl} not found.` }));
 app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ success: false, message: err.message }));
 
