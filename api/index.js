@@ -1,100 +1,96 @@
 require("dotenv").config();
-const express  = require("express");
-const cors     = require("cors");
+const express = require("express");
+const cors = require("cors");
 const mongoose = require("mongoose");
-const admin    = require("firebase-admin");
-
-const PORT      = process.env.PORT      || 5000;
+const admin = require("firebase-admin");
+const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI;
-const NODE_ENV  = process.env.NODE_ENV  || "development";
+const NODE_ENV = process.env.NODE_ENV ||"development";
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-
-// ── DB ────────────────────────────────────────────────────
 const connectDB = async () => {
   if (mongoose.connection.readyState >= 1) return;
   await mongoose.connect(MONGO_URI);
 };
-mongoose.connection.on("connected",    () => console.log("✅  MongoDB Connected"));
-mongoose.connection.on("disconnected", () => console.log("⚠️   MongoDB Disconnected"));
-mongoose.connection.on("error",        (e) => console.error(`❌  MongoDB Error: ${e.message}`));
-
-// ── MODELS ────────────────────────────────────────────────
+mongoose.connection.on("connected", () => console.log("MongoDB Connected"));
+mongoose.connection.on("disconnected", () => console.log("MongoDB Disconnected"));
+mongoose.connection.on("error", (e) => console.error(`MongoDB Error: ${e.message}`));
+//models
+//1st collections -> User
 const userSchema = new mongoose.Schema(
   {
     firebase_uid: { type: String, required: true, unique: true },
-    name:         { type: String, required: true, trim: true },
-    email:        { type: String, required: true, unique: true, lowercase: true, trim: true },
-    role:         { type: String, enum: ["admin", "team_leader", "member"], default: "member" },
-    team_id:      { type: mongoose.Schema.Types.ObjectId, ref: "Team", default: null },
-    is_verified:  { type: Boolean, default: false },
+    name: { type: String, required: true, trim: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    role:{ type: String, enum: ["admin", "team_leader", "member"], default: "member" },
+    team_id: { type: mongoose.Schema.Types.ObjectId, ref: "Team", default: null },
+    is_verified: { type: Boolean, default: false },
   },
-  { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
+  { timestamps:{ createdAt: "created_at", updatedAt: "updated_at" } }
 );
 const User = mongoose.model("User", userSchema);
-
+//2nd collections ->Team
 const teamSchema = new mongoose.Schema(
   {
-    team_name:      { type: String, required: true, trim: true },
+    team_name: { type: String, required: true, trim: true },
     team_leader_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    members:        [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    members: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   },
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );
 const Team = mongoose.model("Team", teamSchema);
-
+//3rd collections -> Task
 const taskSchema = new mongoose.Schema(
   {
-    task_title:       { type: String, required: true, trim: true },
-    task_description: { type: String, default: "" },
-    status:           { type: String, enum: ["To-Do", "In Progress", "Done", "Review"], default: "To-Do" },
-    progress:         { type: Number, min: 0, max: 100, default: 0 },
-    priority:         { type: String, enum: ["low", "medium", "high", "urgent"], default: "medium" },
-    assigned_to:      { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-    team_leader_id:   { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-    team_id:          { type: mongoose.Schema.Types.ObjectId, ref: "Team", required: true },
-    created_by:       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    column_position:  { type: Number, default: 0 },
-    due_date:         { type: Date, default: null },
+    task_title: { type: String, required: true, trim: true },
+    task_description:{ type: String, default: "" },
+    status: { type: String, enum: ["To-Do", "In Progress", "Done", "Review"], default: "To-Do" },
+    progress: { type: Number, min: 0, max: 100, default: 0 },
+    priority: { type: String, enum: ["low", "medium", "high", "urgent"], default: "medium" },
+    assigned_to: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    team_leader_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    team_id: { type: mongoose.Schema.Types.ObjectId, ref: "Team", required: true },
+    created_by:{ type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    column_position:{ type: Number, default: 0 },
+    due_date: { type: Date, default: null },
   },
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );
 
-// ✅ Use async pre-save — no next() parameter needed
 taskSchema.pre("save", async function () {
   if (this.isModified("progress") && this.progress === 100) {
     this.status = "Review";
   }
 });
-
 const Task = mongoose.model("Task", taskSchema);
 
+//4th collections for taskactivity
 const taskActivitySchema = new mongoose.Schema(
   {
-    task_id:         { type: mongoose.Schema.Types.ObjectId, ref: "Task", required: true },
-    user_id:         { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    task_id: { type: mongoose.Schema.Types.ObjectId, ref: "Task", required: true },
+    user_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     previous_status: { type: String, enum: ["To-Do", "In Progress", "Done", "Review", null], default: null },
-    new_status:      { type: String, enum: ["To-Do", "In Progress", "Done", "Review"] },
-    progress:        { type: Number, default: 0 },
-    comment:         { type: String, default: "" },
+    new_status: { type: String, enum: ["To-Do", "In Progress", "Done", "Review"] },
+    progress: { type: Number, default: 0 },
+    comment: { type: String, default: "" },
   },
   { timestamps: { createdAt: "created_at", updatedAt: false } }
 );
 const TaskActivity = mongoose.model("TaskActivity", taskActivitySchema);
-
+//5th collections for taskreview
 const taskReviewSchema = new mongoose.Schema(
   {
-    task_id:       { type: mongoose.Schema.Types.ObjectId, ref: "Task", required: true },
-    reviewer_id:   { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    task_id: { type: mongoose.Schema.Types.ObjectId, ref: "Task", required: true },
+    reviewer_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     review_status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
-    feedback:      { type: String, default: "" },
+    feedback:{ type: String, default: "" },
   },
   { timestamps: { createdAt: "created_at", updatedAt: false } }
 );
 const TaskReview = mongoose.model("TaskReview", taskReviewSchema);
 
-// ── MIDDLEWARE ────────────────────────────────────────────
+//middleware
 const protect = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -106,9 +102,9 @@ const protect = async (req, res, next) => {
     if (!user) {
       user = await User.create({
         firebase_uid: decoded.uid,
-        name:         decoded.name || decoded.email.split("@")[0],
-        email:        decoded.email,
-        is_verified:  decoded.email_verified || false,
+        name: decoded.name || decoded.email.split("@")[0],
+        email: decoded.email,
+        is_verified: decoded.email_verified || false,
       });
     }
     req.user = user;
@@ -137,7 +133,6 @@ const logActivity = async (taskId, userId, prevStatus, newStatus, progress, comm
   }
 };
 
-// ── APP ───────────────────────────────────────────────────
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -153,7 +148,7 @@ app.use(async (req, res, next) => {
   }
 });
 
-// ── AUTH ──────────────────────────────────────────────────
+//auth
 const authRouter = express.Router();
 
 authRouter.post("/sync", protect, async (req, res) => {
@@ -172,7 +167,7 @@ authRouter.get("/me", protect, (req, res) => {
   res.status(200).json({ success: true, user: req.user });
 });
 
-// ── TEAMS ─────────────────────────────────────────────────
+//teams
 const teamRouter = express.Router();
 teamRouter.use(protect);
 
@@ -278,9 +273,9 @@ taskRouter.get("/", async (req, res) => {
       return res.status(403).json({ success: false, message: "You are not a member of this team." });
     }
     const tasks = await Task.find({ team_id })
-      .populate("assigned_to",    "name email")
+      .populate("assigned_to", "name email")
       .populate("team_leader_id", "name email")
-      .populate("created_by",     "name email")
+      .populate("created_by", "name email")
       .sort({ column_position: 1, created_at: -1 });
     res.status(200).json({ success: true, count: tasks.length, tasks });
   } catch (err) {
@@ -300,7 +295,6 @@ taskRouter.post("/", async (req, res) => {
 
     const team = await Team.findById(team_id);
     if (!team) return res.status(404).json({ success: false, message: "Team not found." });
-
     const isLeader = team.team_leader_id.toString() === req.user._id.toString();
     if (!isLeader && req.user.role !== "admin") {
       return res.status(403).json({ success: false, message: "Only team leader or admin can create tasks." });
@@ -403,7 +397,7 @@ taskRouter.get("/:id/activity", async (req, res) => {
   }
 });
 
-// ── REVIEWS ───────────────────────────────────────────────
+//reviews
 const reviewRouter = express.Router();
 reviewRouter.use(protect);
 
@@ -449,7 +443,7 @@ reviewRouter.get("/:taskId", async (req, res) => {
   }
 });
 
-// ── MOUNT ─────────────────────────────────────────────────
+//mounting
 app.use("/api/auth",    authRouter);
 app.use("/api/tasks",   taskRouter);
 app.use("/api/reviews", reviewRouter);
@@ -458,12 +452,5 @@ app.use("/api/teams",   teamRouter);
 app.get("/", (req, res) => res.json({ success: true, message: "Jiva Backend API Running 🚀" }));
 app.use((req, res) => res.status(404).json({ success: false, message: `${req.originalUrl} not found.` }));
 app.use((err, req, res, next) => res.status(err.statusCode || 500).json({ success: false, message: err.message }));
-
-// ── START (local only) ────────────────────────────────────
-if (NODE_ENV !== "production") {
-  connectDB().then(() => {
-    app.listen(PORT, () => console.log(`🚀  http://localhost:${PORT}`));
-  });
-}
 
 module.exports = app;
