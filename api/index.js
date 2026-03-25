@@ -3,19 +3,24 @@ const express  = require("express");
 const cors     = require("cors");
 const mongoose = require("mongoose");
 const admin    = require("firebase-admin");
+
 const PORT      = process.env.PORT      || 5000;
 const MONGO_URI = process.env.MONGO_URI;
 const NODE_ENV  = process.env.NODE_ENV  || "development";
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+
+// ── DB ────────────────────────────────────────────────────
 const connectDB = async () => {
   if (mongoose.connection.readyState >= 1) return;
   await mongoose.connect(MONGO_URI);
 };
-mongoose.connection.on("connected",    () => console.log("✅ MongoDB Connected"));
-mongoose.connection.on("disconnected", () => console.log("⚠️ MongoDB Disconnected"));
-mongoose.connection.on("error",        (e) => console.error(`❌ MongoDB Error: ${e.message}`));
+mongoose.connection.on("connected",    () => console.log("✅  MongoDB Connected"));
+mongoose.connection.on("disconnected", () => console.log("⚠️   MongoDB Disconnected"));
+mongoose.connection.on("error",        (e) => console.error(`❌  MongoDB Error: ${e.message}`));
+
+// ── MODELS ────────────────────────────────────────────────
 const userSchema = new mongoose.Schema(
   {
     firebase_uid: { type: String, required: true, unique: true },
@@ -55,6 +60,8 @@ const taskSchema = new mongoose.Schema(
   },
   { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } }
 );
+
+// ✅ Use async pre-save — no next() parameter needed
 taskSchema.pre("save", async function () {
   if (this.isModified("progress") && this.progress === 100) {
     this.status = "Review";
@@ -86,6 +93,8 @@ const taskReviewSchema = new mongoose.Schema(
   { timestamps: { createdAt: "created_at", updatedAt: false } }
 );
 const TaskReview = mongoose.model("TaskReview", taskReviewSchema);
+
+// ── MIDDLEWARE ────────────────────────────────────────────
 const protect = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -229,6 +238,25 @@ teamRouter.patch("/:id/add-member", async (req, res) => {
       .populate("team_leader_id", "name email")
       .populate("members", "name email role");
     res.status(200).json({ success: true, team: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST /api/teams/:id/join — any authenticated user can join via invite link
+teamRouter.post("/:id/join", async (req, res) => {
+  try {
+    const team = await Team.findById(req.params.id);
+    if (!team) return res.status(404).json({ success: false, message: "Team not found." });
+    const alreadyMember = team.members.some(m => m.toString() === req.user._id.toString());
+    if (alreadyMember) {
+      const pop = await Team.findById(req.params.id).populate("team_leader_id","name email").populate("members","name email role");
+      return res.status(200).json({ success: true, message: "Already a member.", team: pop });
+    }
+    await Team.findByIdAndUpdate(req.params.id, { $addToSet: { members: req.user._id } });
+    await User.findByIdAndUpdate(req.user._id, { team_id: team._id });
+    const updated = await Team.findById(req.params.id).populate("team_leader_id","name email").populate("members","name email role");
+    res.status(200).json({ success: true, message: "Joined successfully.", team: updated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -420,6 +448,8 @@ reviewRouter.get("/:taskId", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// ── MOUNT ─────────────────────────────────────────────────
 app.use("/api/auth",    authRouter);
 app.use("/api/tasks",   taskRouter);
 app.use("/api/reviews", reviewRouter);
@@ -428,6 +458,8 @@ app.use("/api/teams",   teamRouter);
 app.get("/", (req, res) => res.json({ success: true, message: "Jiva Backend API Running 🚀" }));
 app.use((req, res) => res.status(404).json({ success: false, message: `${req.originalUrl} not found.` }));
 app.use((err, req, res, next) => res.status(err.statusCode || 500).json({ success: false, message: err.message }));
+
+// ── START (local only) ────────────────────────────────────
 if (NODE_ENV !== "production") {
   connectDB().then(() => {
     app.listen(PORT, () => console.log(`🚀  http://localhost:${PORT}`));
